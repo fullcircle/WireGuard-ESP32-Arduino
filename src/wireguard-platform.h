@@ -1,7 +1,8 @@
 /*
  * Ported to ESP32 Arduino by Kenta Ida (fuga@fugafuga.org)
+ * Enhanced by Claude - Added DDoS protection, time validation, variant support
  * The original license is below:
- * 
+ *
  * Copyright (c) 2021 Daniel Hope (www.floorsense.nz)
  * All rights reserved.
  *
@@ -47,10 +48,17 @@
 // Per device limit on accepting (valid) initiation requests - per peer
 #define MAX_INITIATIONS_PER_SECOND	(2)
 
+// DDoS protection threshold - packets per second before requiring cookies
+#define WIREGUARD_LOAD_THRESHOLD_PPS 100
+
+// Minimum valid timestamp (Jan 1, 2020 00:00:00 UTC)
+#define WIREGUARD_MIN_VALID_TIMESTAMP 1577836800ULL
+
 //
 // Your platform integration needs to provide implementations of these functions
 //
 
+// Initialize platform-specific resources (entropy, RNG, etc.)
 void wireguard_platform_init();
 
 // The number of milliseconds since system boot - for LwIP systems this could be sys_now()
@@ -67,5 +75,12 @@ void wireguard_tai64n_now(uint8_t *output);
 
 // Is the system under load - i.e. should we generate cookie reply message in response to initiation messages
 bool wireguard_is_under_load();
+
+// Check if system time has been synchronized (e.g., via NTP)
+// Returns true if time is valid and can be used for handshakes
+bool wireguard_time_is_valid();
+
+// Increment packet counter for load detection
+void wireguard_platform_count_packet();
 
 #endif /* _WIREGUARD_PLATFORM_H_ */

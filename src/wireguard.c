@@ -160,9 +160,28 @@ struct wireguard_peer *peer_lookup_by_handshake(struct wireguard_device *device,
 	return result;
 }
 
+/**
+ * Check if a timestamp has expired
+ * Handles 32-bit timer wrap-around (occurs after ~49 days)
+ */
 bool wireguard_expired(uint32_t created_millis, uint32_t valid_seconds) {
-	uint32_t diff = wireguard_sys_now() - created_millis;
-	return (diff >= (valid_seconds * 1000));
+	uint32_t now = wireguard_sys_now();
+	uint32_t diff;
+
+	// Handle wrap-around: unsigned subtraction handles this correctly
+	// in C when both values are unsigned 32-bit
+	diff = now - created_millis;
+
+	// Convert valid_seconds to milliseconds, checking for overflow
+	uint32_t valid_millis;
+	if (valid_seconds > (UINT32_MAX / 1000)) {
+		// Would overflow, treat as very large (always not expired until wrap)
+		valid_millis = UINT32_MAX;
+	} else {
+		valid_millis = valid_seconds * 1000;
+	}
+
+	return (diff >= valid_millis);
 }
 
 
@@ -1019,6 +1038,13 @@ bool wireguard_decrypt_packet(uint8_t *dst, const uint8_t *src, size_t src_len, 
 	return wireguard_aead_decrypt(dst, src, src_len, NULL, 0, counter, keypair->receiving_key);
 }
 
+/**
+ * Decode base64 string to binary
+ * @param str Input base64 string
+ * @param out Output buffer for decoded bytes
+ * @param outlen In: size of output buffer, Out: number of decoded bytes
+ * @return true on success, false on error
+ */
 bool wireguard_base64_decode(const char *str, uint8_t *out, size_t *outlen) {
 	uint32_t accum = 0; // We accumulate upto four blocks of 6 bits into this to form 3 bytes output
 	uint8_t char_count = 0; // How many characters have we processed in this block
@@ -1031,11 +1057,23 @@ bool wireguard_base64_decode(const char *str, uint8_t *out, size_t *outlen) {
 	int x;
 	size_t inlen;
 
-	if (!str) {
+	// Input validation
+	if (!str || !out || !outlen) {
 		return false;
 	}
 
 	inlen = strlen(str);
+
+	// Check for reasonable input length (max 256 chars for keys/tokens)
+	// This prevents excessive processing on malformed inputs
+	if (inlen == 0 || inlen > 256) {
+		return false;
+	}
+
+	// Base64 string length must be multiple of 4
+	if (inlen % 4 != 0) {
+		return false;
+	}
 
 	for (x = 0; x < inlen; x++) {
 		c = str[x];
