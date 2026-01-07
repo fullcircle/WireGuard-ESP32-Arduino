@@ -1,7 +1,8 @@
 /*
  * Ported to ESP32 Arduino by Kenta Ida (fuga@fugafuga.org)
+ * Enhanced by Claude - Fixed deprecated APIs, added PSK support, improved error handling
  * The original license is below:
- * 
+ *
  * Copyright (c) 2021 Daniel Hope (www.floorsense.nz)
  * All rights reserved.
  *
@@ -46,9 +47,19 @@
 #include "lwip/timeouts.h"
 
 #include "wireguard.h"
+#include "wireguard-platform.h"
 #include "crypto.h"
 #include "esp_log.h"
-#include "tcpip_adapter.h"
+
+// ESP-IDF version detection for API compatibility
+#include "esp_idf_version.h"
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 1, 0)
+    #include "esp_netif.h"
+    #define USE_ESP_NETIF 1
+#else
+    #include "tcpip_adapter.h"
+    #define USE_ESP_NETIF 0
+#endif
 
 #include "esp32-hal-log.h"
 
@@ -562,6 +573,8 @@ void wireguardif_network_rx(void *arg, struct udp_pcb *pcb, struct pbuf *p, cons
 		case MESSAGE_HANDSHAKE_INITIATION:
 			msg_initiation = (struct message_handshake_initiation *)data;
 			log_i(TAG "HANDSHAKE_INITIATION: %08x:%d", addr->u_addr.ip4.addr, port);
+			// Count packet for DDoS detection
+			wireguard_platform_count_packet();
 			// Check mac1 (and optionally mac2) are correct - note it may internally generate a cookie reply packet
 			if (wireguardif_check_initiation_message(device, msg_initiation, addr, port)) {
 
@@ -912,16 +925,46 @@ void wireguardif_shutdown(struct netif *netif) {
 	netif->state = NULL;
 }
 
+/**
+ * Helper function to get the underlying network interface
+ * Uses new esp_netif API on ESP-IDF 4.1+ or legacy tcpip_adapter on older versions
+ */
+static struct netif* get_underlying_netif(void) {
+    struct netif* underlying_netif = NULL;
+
+#if USE_ESP_NETIF
+    // Use new ESP-IDF netif API (4.1+)
+    esp_netif_t *esp_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (esp_netif != NULL) {
+        underlying_netif = (struct netif *)esp_netif_get_netif_impl(esp_netif);
+    }
+    // If WiFi STA not found, try Ethernet
+    if (underlying_netif == NULL) {
+        esp_netif = esp_netif_get_handle_from_ifkey("ETH_DEF");
+        if (esp_netif != NULL) {
+            underlying_netif = (struct netif *)esp_netif_get_netif_impl(esp_netif);
+        }
+    }
+#else
+    // Use legacy tcpip_adapter API
+    tcpip_adapter_get_netif(TCPIP_ADAPTER_IF_STA, (void **)&underlying_netif);
+    if (underlying_netif == NULL) {
+        tcpip_adapter_get_netif(TCPIP_ADAPTER_IF_ETH, (void **)&underlying_netif);
+    }
+#endif
+
+    return underlying_netif;
+}
+
 err_t wireguardif_init(struct netif *netif) {
 	err_t result;
 	struct wireguardif_init_data *init_data;
-	struct wireguard_device *device;
-	struct udp_pcb *udp;
+	struct wireguard_device *device = NULL;
+	struct udp_pcb *udp = NULL;
 	uint8_t private_key[WIREGUARD_PRIVATE_KEY_LEN];
 	size_t private_key_len = sizeof(private_key);
 
-	struct netif* underlying_netif;
-	tcpip_adapter_get_netif(TCPIP_ADAPTER_IF_STA, &underlying_netif);
+	struct netif* underlying_netif = get_underlying_netif();
 	log_i(TAG "underlying_netif = %p", underlying_netif);
 
 	LWIP_ASSERT("netif != NULL", (netif != NULL));

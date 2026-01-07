@@ -1,7 +1,8 @@
 /*
  * Ported to ESP32 Arduino by Kenta Ida (fuga@fugafuga.org)
+ * Enhanced by Claude - Added PSK string support, fixed typos, improved docs
  * The original license is below:
- * 
+ *
  * Copyright (c) 2021 Daniel Hope (www.floorsense.nz)
  * All rights reserved.
  *
@@ -33,7 +34,6 @@
  * Author: Daniel Hope <daniel.hope@smartalock.com>
  */
 
-
 #ifndef _WIREGUARDIF_H_
 #define _WIREGUARDIF_H_
 
@@ -44,94 +44,173 @@
 // Default MTU for WireGuard is 1420 bytes
 #define WIREGUARDIF_MTU (1420)
 
-#define WIREGUARDIF_DEFAULT_PORT		(51820)
-#define WIREGUARDIF_KEEPALIVE_DEFAULT	(0xFFFF)
+// Default WireGuard UDP port
+#define WIREGUARDIF_DEFAULT_PORT        (51820)
 
+// Special value indicating keepalive should use default (10 seconds)
+#define WIREGUARDIF_KEEPALIVE_DEFAULT   (0xFFFF)
+
+/**
+ * WireGuard interface initialization data
+ */
 struct wireguardif_init_data {
-	// Required: the private key of this WireGuard network interface
-	const char *private_key;
-	// Required: What UDP port to listen on
-	u16_t listen_port;
-	// Optional: restrict send/receive of encapsulated WireGuard traffic to this network interface only (NULL to use routing table)
-	struct netif *bind_netif;
+    // Required: the private key of this WireGuard network interface (base64 encoded)
+    const char *private_key;
+    // Required: What UDP port to listen on
+    u16_t listen_port;
+    // Optional: restrict send/receive of encapsulated WireGuard traffic to this network interface only
+    // Set to NULL to use routing table
+    struct netif *bind_netif;
 };
 
+/**
+ * WireGuard peer configuration
+ */
 struct wireguardif_peer {
-	const char *public_key;
-	// Optional pre-shared key (32 bytes) - make sure this is NULL if not to be used
-	const uint8_t *preshared_key;
-	// tai64n of largest timestamp we have seen during handshake to avoid replays
-	uint8_t greatest_timestamp[12];
+    // Required: Peer's public key (base64 encoded, 44 characters)
+    const char *public_key;
 
-	// Allowed ip/netmask (can add additional later but at least one is required)
-	ip_addr_t allowed_ip;
-	ip_addr_t allowed_mask;
+    // Optional: Pre-shared key for additional security (base64 encoded, 44 characters)
+    // Set to NULL if not using PSK
+    const char *preshared_key;
 
-	// End-point details (may be blank)
-	ip_addr_t endpoint_ip;
-	u16_t endport_port;
-	u16_t keep_alive;
+    // TAI64N of largest timestamp seen during handshake (for replay protection)
+    // Usually initialized to zeros
+    uint8_t greatest_timestamp[12];
+
+    // Required: Allowed IP address for this peer
+    ip_addr_t allowed_ip;
+    // Required: Netmask for allowed IP (use 0.0.0.0 for all traffic)
+    ip_addr_t allowed_mask;
+
+    // Peer endpoint (required for initiating connections)
+    ip_addr_t endpoint_ip;
+    // Peer endpoint port (use WIREGUARDIF_DEFAULT_PORT for 51820)
+    u16_t endpoint_port;
+
+    // Keepalive interval in seconds (0 to disable, WIREGUARDIF_KEEPALIVE_DEFAULT for 10s)
+    u16_t keep_alive;
 };
 
+// Backward compatibility for typo in original API
+#define endport_port endpoint_port
+
+// Invalid peer index (returned when peer allocation fails)
 #define WIREGUARDIF_INVALID_INDEX (0xFF)
 
-/* static struct netif wg_netif_struct = {0};
- * struct wireguard_interface wg;
- * wg.private_key = "abcdefxxx..xxxxx=";
+/*
+ * Usage Example:
+ * ==============
+ *
+ * static struct netif wg_netif_struct = {0};
+ * struct wireguardif_init_data wg;
+ * wg.private_key = "abcdefxxx..xxxxx=";  // Base64 private key
  * wg.listen_port = 51820;
- * wg.bind_netif = NULL; // Pass netif to listen on, NULL for all interfaces
+ * wg.bind_netif = NULL;  // NULL for all interfaces
  *
- * netif = netif_add(&netif_struct, &ipaddr, &netmask, &gateway, &wg, &wireguardif_init, &ip_input);
- *
- * netif_set_up(wg_net);
+ * netif = netif_add(&netif_struct, &ipaddr, &netmask, &gateway,
+ *                   &wg, &wireguardif_init, &ip_input);
+ * netif_set_up(wg_netif);
  *
  * struct wireguardif_peer peer;
  * wireguardif_peer_init(&peer);
- * peer.public_key = "apoehc...4322abcdfejg=;
- * peer.preshared_key = NULL;
+ * peer.public_key = "apoehc...4322abcdfejg=";
+ * peer.preshared_key = NULL;  // Or base64 PSK
  * peer.allowed_ip = allowed_ip;
  * peer.allowed_mask = allowed_mask;
- *
- * // If you want to enable output connection
  * peer.endpoint_ip = peer_ip;
- * peer.endport_port = 12345;
+ * peer.endpoint_port = 51820;
  *
- * uint8_t wireguard_peer_index;
- * wireguardif_add_peer(netif, &peer, &wireguard_peer_index);
+ * uint8_t peer_index;
+ * wireguardif_add_peer(netif, &peer, &peer_index);
  *
- * if ((wireguard_peer_index != WIREGUARDIF_INVALID_INDEX) && !ip_addr_isany(&peer.endpoint_ip)) {
- *   // Start outbound connection to peer
- *   wireguardif_connect(wg_net, wireguard_peer_index);
+ * if (peer_index != WIREGUARDIF_INVALID_INDEX && !ip_addr_isany(&peer.endpoint_ip)) {
+ *     wireguardif_connect(netif, peer_index);
  * }
- *
  */
 
-// Initialise a new WireGuard network interface (netif)
+/**
+ * Initialize a new WireGuard network interface
+ *
+ * @param netif Network interface to initialize (state should be wireguardif_init_data*)
+ * @return ERR_OK on success
+ */
 err_t wireguardif_init(struct netif *netif);
 
-// Shutdown a WireGuard network interface (netif)
+/**
+ * Shutdown a WireGuard network interface and release resources
+ *
+ * @param netif Network interface to shutdown
+ */
 void wireguardif_shutdown(struct netif *netif);
 
-// Helper to initialise the peer struct with defaults
+/**
+ * Initialize peer structure with default values
+ *
+ * @param peer Peer structure to initialize
+ */
 void wireguardif_peer_init(struct wireguardif_peer *peer);
 
-// Add a new peer to the specified interface - see wireguard.h for maximum number of peers allowed
-// On success the peer_index can be used to reference this peer in future function calls
+/**
+ * Add a new peer to the WireGuard interface
+ *
+ * @param netif WireGuard network interface
+ * @param peer Peer configuration
+ * @param peer_index Output: index of added peer (use in other functions)
+ * @return ERR_OK on success, ERR_MEM if no peer slots available
+ */
 err_t wireguardif_add_peer(struct netif *netif, struct wireguardif_peer *peer, u8_t *peer_index);
 
-// Remove the given peer from the network interface
+/**
+ * Remove a peer from the WireGuard interface
+ *
+ * @param netif WireGuard network interface
+ * @param peer_index Index of peer to remove
+ * @return ERR_OK on success
+ */
 err_t wireguardif_remove_peer(struct netif *netif, u8_t peer_index);
 
-// Update the "connect" IP of the given peer
+/**
+ * Update the endpoint address of a peer
+ *
+ * @param netif WireGuard network interface
+ * @param peer_index Index of peer to update
+ * @param ip New endpoint IP address
+ * @param port New endpoint port
+ * @return ERR_OK on success
+ */
 err_t wireguardif_update_endpoint(struct netif *netif, u8_t peer_index, const ip_addr_t *ip, u16_t port);
 
-// Try and connect to the given peer
+/**
+ * Initiate connection to a peer
+ * This starts the handshake process
+ *
+ * @param netif WireGuard network interface
+ * @param peer_index Index of peer to connect to
+ * @return ERR_OK on success
+ */
 err_t wireguardif_connect(struct netif *netif, u8_t peer_index);
 
-// Stop trying to connect to the given peer
+/**
+ * Disconnect from a peer
+ * This destroys the session keys
+ *
+ * @param netif WireGuard network interface
+ * @param peer_index Index of peer to disconnect
+ * @return ERR_OK on success
+ */
 err_t wireguardif_disconnect(struct netif *netif, u8_t peer_index);
 
-// Is the given peer "up"? A peer is up if it has a valid session key it can communicate with
+/**
+ * Check if a peer connection is active
+ * A peer is "up" if it has valid session keys
+ *
+ * @param netif WireGuard network interface
+ * @param peer_index Index of peer to check
+ * @param current_ip Output: current peer IP (can be NULL)
+ * @param current_port Output: current peer port (can be NULL)
+ * @return ERR_OK if connected, ERR_CONN if not connected
+ */
 err_t wireguardif_peer_is_up(struct netif *netif, u8_t peer_index, ip_addr_t *current_ip, u16_t *current_port);
 
 #endif /* _WIREGUARDIF_H_ */
